@@ -1,0 +1,18 @@
+record (ai, "$(P)$(R)t-get") {
+	field (SCAN, ".5 second")
+	field (DTYP, "stream")
+	field (INP, "@mwb_pt100.proto getTemperature($(AA)) $(PORT)")
+	field (EGU, "K")
+}
+
+record(stringin, "$(P)$(R)ModuleName") {
+	field (PINI, "YES")
+	field (DTYP, "stream")
+	field (INP, "@mwb_pt100.proto getModuleName($(AA)) $(PORT)")
+}
+record(stringin, "$(P)$(R)FirmwareVersion") {
+	field (PINI, "YES")
+	field (DTYP, "stream")
+	field (INP, "@mwb_pt100.proto getFirmwareVersion($(AA)) $(PORT)")
+}
+

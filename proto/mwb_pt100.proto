@@ -1,0 +1,22 @@
+Terminator = CR;
+
+manualSend {
+	out "%s";
+	in "%*#s";
+}
+
+getTemperature {
+	out "#\$1";
+	in ">%f";
+}
+
+getModuleName {
+	out "$\$1" "M";
+	in "!\$1" "%#s";
+}
+
+getFirmwareVersion {
+	out "$\$1" "F";
+	in "!\$1" "%#s";
+}
+	
