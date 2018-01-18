@@ -7,7 +7,6 @@
 
     Room for improvement:
         - Calibration resistor hardcoded (470R)
-        - Linear approximation of T(R) only good for 0°C < T < 100°C
         - RTD fault detection rudimentary
 
     Copyright (C) Jan 2018, M. W. Bruker
@@ -38,10 +37,21 @@
 #include <util/delay.h>
 #include "uart.h"
 
-// deltaT = R/(alpha * R0) - 1/alpha
-// unit for calculation = 0.01 K
-#define TEMP_SLOPE 1.8625236        // 470 Ohm / (alpha * R0 * (2^16 - 1))
-#define TEMP_OFFSET (25970 - 27315) // 1/alpha + conversion from C to K
+#define Rref 470.0F                    // reference resistor to define ADC full scale
+#define R0   100.0F                    // R(T=0°C)
+#define ADC_FACTOR (Rref / 65535.0F)   // converts ADC value to ohms
+
+// T > 0 °C: T = -A/2B - sqrt((A/(2B))^2 - (R0 - R)/(R0 B))
+#define TEMP_POLY1_A 3.9083E-3F
+#define TEMP_POLY1_B -5.775E-7F
+
+// T < 0 °C: T = aR^3 + bR^3 + cR - d
+// https://de.wikibooks.org/wiki/Linearisierung_von_resistiven_Sensoren/_Pt100
+#define TEMP_POLY2_A -5.67E-4F
+#define TEMP_POLY2_B 2.4984E-1F
+#define TEMP_POLY2_C 222.764F
+#define TEMP_POLY2_D (-24207.8F + 27315.0F)
+
 #define BUFFER_SIZE 20
 #define AVERAGE_SAMPLES 32
 
@@ -66,7 +76,7 @@ const uint16_t baudRateCodes[NUMBER_BAUD_RATES] PROGMEM = {
 
 
 const char moduleNameString[] PROGMEM = "MWB-PT100";
-const char firmwareVersionString[] PROGMEM = "2018/01/02";
+const char firmwareVersionString[] PROGMEM = "2018/01/18";
 
 uint8_t busAddress;
 uint8_t baudRate;
@@ -77,7 +87,7 @@ volatile uint8_t max31865_dataReady;
 // MAX31865 DRDY falling edge
 ISR(INT2_vect)
 {
-	max31865_dataReady = 1;
+    max31865_dataReady = 1;
 }
 
 ISR(TIMER0_OVF_vect)
@@ -91,23 +101,23 @@ ISR(TIMER0_OVF_vect)
 
 void max31865_init()
 {
-	MCUCSR &= ~(1 << ISC2); // trigger INT2 on falling edge
-	GICR |= (1 << INT2);
-	
-	SPCR = (1 << SPE) | (1 << MSTR) | (1 << CPOL) | (1 << CPHA) | (1 << SPR0); // initialize SPI, f=fclk/16
-	
-	PORTB &= ~(1 << PB4); // pull CS low
-	_delay_loop_1(1);
-	
-	SPDR = 0x80; // write to configuration register
-	while (!(SPSR & (1 << SPIF)));
-	SPDR = 0b11000001; // Vbias on, Conversion mode auto, 4-wire RTD, 50Hz filter
-	while (!(SPSR & (1 << SPIF)));
-	
-	PORTB |= (1 << PB4);
-	max31865_dataReady = !(PINB & (1 << PB2));
+    MCUCSR &= ~(1 << ISC2); // trigger INT2 on falling edge
+    GICR |= (1 << INT2);
+    
+    SPCR = (1 << SPE) | (1 << MSTR) | (1 << CPOL) | (1 << CPHA) | (1 << SPR0); // initialize SPI, f=fclk/16
+    
+    PORTB &= ~(1 << PB4); // pull CS low
+    _delay_loop_1(1);
+    
+    SPDR = 0x80; // write to configuration register
+    while (!(SPSR & (1 << SPIF)));
+    SPDR = 0b11000001; // Vbias on, Conversion mode auto, 4-wire RTD, 50Hz filter
+    while (!(SPSR & (1 << SPIF)));
+    
+    PORTB |= (1 << PB4);
+    max31865_dataReady = !(PINB & (1 << PB2));
 }
-	
+    
 void setBaudRate()
 {
     if ((baudRate < 3) || (baudRate > NUMBER_BAUD_RATES + 2))
@@ -201,13 +211,13 @@ void processCommand(char prefix, char address1, char address2, char *string, uin
     if (prefix != '$')
         return;
 
-	switch (string[0]) {
+    switch (string[0]) {
         // $AA2: read configuration status
         // type code unsupported, data format etc. unsupported
         case '2': {
             char buffer[3];
             uart_putc('!');
-			uart_putc(address1);
+            uart_putc(address1);
             uart_putc(address2);
             uart_putc('F');
             uart_putc('F');
@@ -222,45 +232,95 @@ void processCommand(char prefix, char address1, char address2, char *string, uin
             break;
         }
 
-		// $AAM: read module name
-		case 'M': {
-			uart_putc('!');
-			uart_putc(address1);
+        // $AAM: read module name
+        case 'M': {
+            uart_putc('!');
+            uart_putc(address1);
             uart_putc(address2);
-			uart_puts_p(moduleNameString);
-			uart_putc('\r');
+            uart_puts_p(moduleNameString);
+            uart_putc('\r');
             uart_transmit();
-			break;
-		}
-		
+            break;
+        }
+        
         // $AAF: read firmware version
-		case 'F': {
-			uart_putc('!');
-			uart_putc(address1);
+        case 'F': {
+            uart_putc('!');
+            uart_putc(address1);
             uart_putc(address2);
-			uart_puts_p(firmwareVersionString);
-			uart_putc('\r');
+            uart_puts_p(firmwareVersionString);
+            uart_putc('\r');
             uart_transmit();
-			break;
-		}
+            break;
+        }
 
-	}
+    }
+}
+
+void checkCommandBuffer()
+{
+    static char commandBuffer[BUFFER_SIZE];
+    static uint8_t bufferIndex = 0;
+
+    uint16_t c;
+    while (!((c = uart_getc()) & UART_NO_DATA)) {
+        if (((uint8_t) c == '\r') || ((uint8_t) c == '\n')) {
+            commandBuffer[bufferIndex] = 0;
+            if (bufferIndex > 2) {
+                processCommand(commandBuffer[0], commandBuffer[1], commandBuffer[2], &commandBuffer[3], bufferIndex - 3);
+            }
+            bufferIndex = 0;
+        } else {
+            commandBuffer[bufferIndex++] = c;
+        }
+    }
+}
+
+uint16_t convertAdcToKelvin(uint32_t adcValue)
+{
+    // As float calculations are very expensive, regularly check for bus commands
+    // to guarantee short reply times.
+
+    float ohms = ((float) adcValue) * ADC_FACTOR;
+    checkCommandBuffer();
+    
+    // solve Callendar-van Dusen equation above 0 °C
+    if (adcValue >= (R0 / ADC_FACTOR)) {
+        const float a2b = TEMP_POLY1_A / (2.0 * TEMP_POLY1_B);
+	float root = sqrt(a2b * a2b - (R0 - ohms) / (100.0 * TEMP_POLY1_B));
+	checkCommandBuffer();
+        return ((uint16_t) (100 * (-root - a2b))) + 27315;
+    }
+
+    // apply polynomial approximation below 0 °C
+    float ohms2 = ohms * ohms;
+    checkCommandBuffer();
+    float ohms3 = ohms2 * ohms;
+    checkCommandBuffer();
+
+    float result = TEMP_POLY2_A * ohms3;
+    checkCommandBuffer();
+    result += TEMP_POLY2_B * ohms2;
+    checkCommandBuffer();
+    result += TEMP_POLY2_C * ohms;
+    checkCommandBuffer();
+    result += TEMP_POLY2_D;
+    checkCommandBuffer();
+
+    return (uint16_t) result;
 }
 
 int main()
 {
-	char commandBuffer[BUFFER_SIZE];
-	uint8_t bufferIndex = 0;
-	
-	// set up ports, enable pull-up for unused pins
-	// PA3 = data LED
-	DDRA = (1 << PA3);
-	PORTA = ~(1 << PA3);
-	// PB2 = DRDY, PB4 = CS, PB5 = MOSI, PB6 = MISO, PB7 = SCK
-	DDRB = (1 << PB4) | (1 << PB5) | (1 << PB7);
-	PORTB = 0xff;
-	DDRC = 0;
-	PORTC = 0xff;
+    // set up ports, enable pull-up for unused pins
+    // PA3 = data LED
+    DDRA = (1 << PA3);
+    PORTA = ~(1 << PA3);
+    // PB2 = DRDY, PB4 = CS, PB5 = MOSI, PB6 = MISO, PB7 = SCK
+    DDRB = (1 << PB4) | (1 << PB5) | (1 << PB7);
+    PORTB = 0xff;
+    DDRC = 0;
+    PORTC = 0xff;
 
     busAddress = eeprom_read_byte(&saveBusAddress);
     baudRate = eeprom_read_byte(&saveBaudRate);
@@ -269,64 +329,53 @@ int main()
     // set up timer for data LED
     TCCR0 = (1 << CS02) | (1 << CS00);      // clock prescaler = 1024, ~70µs per tick
 
-	// PD2 = EN, PD3 = DE
-	DDRD |= (1 << PD2) | (1 << PD3);
-	// enable ADuM
-	PORTD |= (1 << PD2);
-	
-	uint32_t tempSum = 0;
-	uint8_t sampleCount = 0;
-	
-	currentTemp = 0;
-	
-	sei();
-	
-	max31865_init();
-	
-	while (1) {
-		if (max31865_dataReady) {
-			uint16_t rtdValue;
-			max31865_dataReady = 0;
-			
-			PORTB &= ~(1 << PB4);
-			_delay_loop_1(5);
-			
-			SPDR = 0x01;
-			while (!(SPSR & (1 << SPIF)));
-			SPDR = 0x00;
-			while (!(SPSR & (1 << SPIF)));
-			rtdValue = ((uint16_t) SPDR) << 8;
-			SPDR = 0x00;
-			while (!(SPSR & (1 << SPIF)));
-			rtdValue |= SPDR;
-			
-			PORTB |= (1 << PB4);
-			
+    // PD2 = EN, PD3 = DE
+    DDRD |= (1 << PD2) | (1 << PD3);
+    // enable ADuM
+    PORTD |= (1 << PD2);
+    
+    uint32_t tempSum = 0;
+    uint8_t sampleCount = 0;
+    
+    currentTemp = 0;
+    
+    sei();
+    
+    max31865_init();
+    
+    while (1) {
+        if (max31865_dataReady) {
+            uint16_t rtdValue;
+            max31865_dataReady = 0;
+            
+            PORTB &= ~(1 << PB4);
+            _delay_loop_1(5);
+            
+            SPDR = 0x01;
+            while (!(SPSR & (1 << SPIF)));
+            SPDR = 0x00;
+            while (!(SPSR & (1 << SPIF)));
+            rtdValue = ((uint16_t) SPDR) << 8;
+            SPDR = 0x00;
+            while (!(SPSR & (1 << SPIF)));
+            rtdValue |= SPDR;
+            
+            PORTB |= (1 << PB4);
+            
             if (rtdValue & 0x0001) { // check fault bit
                 tempSum = 0;
                 currentTemp = 0;
                 sampleCount = 0;
             } else {
-    			tempSum += rtdValue;
-    			if (++sampleCount == AVERAGE_SAMPLES) {
-    				sampleCount = 0;
-    				currentTemp = (tempSum / AVERAGE_SAMPLES) * TEMP_SLOPE - TEMP_OFFSET;
-    				tempSum = 0;
-    			}
+                tempSum += rtdValue;
+                if (++sampleCount == AVERAGE_SAMPLES) {
+                    sampleCount = 0;
+                    currentTemp = convertAdcToKelvin((uint16_t) (tempSum / AVERAGE_SAMPLES));
+                    tempSum = 0;
+                }
             }
-		}
+        }
         
-		uint16_t c;
-		while (!((c = uart_getc()) & UART_NO_DATA)) {
-			if (((uint8_t) c == '\r') || ((uint8_t) c == '\n')) {
-				commandBuffer[bufferIndex] = 0;
-				if (bufferIndex > 2) {
-                    processCommand(commandBuffer[0], commandBuffer[1], commandBuffer[2], &commandBuffer[3], bufferIndex - 3);
-				}
-				bufferIndex = 0;
-			} else {
-				commandBuffer[bufferIndex++] = c;
-			}
-		}
-	}
+        checkCommandBuffer();
+    }
 }
