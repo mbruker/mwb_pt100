@@ -3,6 +3,8 @@ record (ai, "$(P)$(R)t-get") {
 	field (DTYP, "stream")
 	field (INP, "@mwb_pt100.proto getTemperature($(AA)) $(PORT)")
 	field (EGU, "K")
+	field (LOLO, 1.0)
+	field (LLSV, MAJOR)
 }
 
 record(stringin, "$(P)$(R)ModuleName") {

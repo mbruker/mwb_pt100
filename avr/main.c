@@ -76,11 +76,12 @@ const uint16_t baudRateCodes[NUMBER_BAUD_RATES] PROGMEM = {
 
 
 const char moduleNameString[] PROGMEM = "MWB-PT100";
-const char firmwareVersionString[] PROGMEM = "2018/01/18";
+const char firmwareVersionString[] PROGMEM = "2018/01/22";
 
 uint8_t busAddress;
 uint8_t baudRate;
 uint16_t currentTemp;
+uint8_t faultRegister;
 volatile uint8_t ledTimer;
 volatile uint8_t max31865_dataReady;
 
@@ -116,6 +117,20 @@ void max31865_init()
     
     PORTB |= (1 << PB4);
     max31865_dataReady = !(PINB & (1 << PB2));
+    faultRegister = 0;
+}
+
+void max31865_resetFault()
+{
+    PORTB &= ~(1 << PB4); // pull CS low
+    _delay_loop_1(1);
+    
+    SPDR = 0x80; // write to configuration register
+    while (!(SPSR & (1 << SPIF)));
+    SPDR = 0b11000011; // Vbias on, Conversion mode auto, 4-wire RTD, 50Hz filter, fault status clear
+    while (!(SPSR & (1 << SPIF)));
+    
+    PORTB |= (1 << PB4);
 }
     
 void setBaudRate()
@@ -166,6 +181,14 @@ void processCommand(char prefix, char address1, char address2, char *string, uin
     if (prefix == '#') {        // #AA: read analog data
         char buffer[10];
         uart_putc('>');
+        if (faultRegister) {
+            uart_puts("FAULT ");
+            utoa(faultRegister, buffer, 10);
+            uart_putc('\r');
+            uart_transmit();
+            faultRegister = 0;
+            return;
+        }
         utoa(currentTemp, buffer, 10);
         // insert fixed decimal point
         uint8_t l = strlen(buffer);
@@ -363,16 +386,23 @@ int main()
             PORTB |= (1 << PB4);
             
             if (rtdValue & 0x0001) { // check fault bit
-                tempSum = 0;
-                currentTemp = 0;
+                PORTB &= ~(1 << PB4); // pull CS low
+                _delay_loop_1(1);
+                SPDR = 0x07;
+                while (!(SPSR & (1 << SPIF)));
+                SPDR = 0x00;
+                while (!(SPSR & (1 << SPIF)));
+                faultRegister = SPDR;
+                PORTB |= (1 << PB4);
+                _delay_loop_1(1);
+
+                max31865_resetFault();
+            }
+            tempSum += rtdValue;
+            if (++sampleCount == AVERAGE_SAMPLES) {
                 sampleCount = 0;
-            } else {
-                tempSum += rtdValue;
-                if (++sampleCount == AVERAGE_SAMPLES) {
-                    sampleCount = 0;
-                    currentTemp = convertAdcToKelvin((uint16_t) (tempSum / AVERAGE_SAMPLES));
-                    tempSum = 0;
-                }
+                currentTemp = convertAdcToKelvin((uint16_t) (tempSum / AVERAGE_SAMPLES));
+                tempSum = 0;
             }
         }
         
