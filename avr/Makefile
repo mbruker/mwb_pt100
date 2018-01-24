@@ -49,7 +49,7 @@ flash: hex
 	avrdude -P usb -c avrispmkII -p m32 -U flash:w:$(PRG).hex
 
 fuse:
-	avrdude -P usb -c avrispmkII -p m32 -U lfuse:w:0b01111111:m -U hfuse:w:0b11000001:m
+	avrdude -P usb -c avrispmkII -p m32 -U lfuse:w:0b10111111:m -U hfuse:w:0b11000001:m
 
 eeprom:
 	avrdude -P usb -c avrispmkII -p m32 -U eeprom:w:$(PRG).eep

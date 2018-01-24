@@ -1,6 +1,6 @@
 Terminator = CR;
 
-manualSend {
+debug {
 	out "%s";
 	in "%*#s";
 }

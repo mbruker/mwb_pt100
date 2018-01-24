@@ -1,3 +1,8 @@
+record(stringin, "$(P)$(R)debug") {
+	field (DTYP, "stream")
+	field (INP, "@mwb_pt100.proto debug $(PORT)")
+}
+
 record (ai, "$(P)$(R)t-get") {
 	field (SCAN, ".5 second")
 	field (DTYP, "stream")
